@@ -1,0 +1,26 @@
+use "bytes -> landlock" from "landlock"
+
+fn main() is
+    if !landlock::is_supported() is
+        write("Landlock niewspierany przez to jadro - pomijam sandboxing")
+        return
+    end
+
+    write("Wspierana wersja ABI Landlocka: " + to_string(landlock::abi_version()))
+
+    let paths: [string] = ["/usr", "/lib", "/lib64", "/etc/resolv.conf"]
+
+    match landlock::sandbox_readonly(paths) is
+        landlock::LandlockResult::Ok(_) => is
+            write("Piaskownica aktywna: dostep tylko-do-odczytu do " + to_string(array_len(paths)) + " sciezek")
+        end
+        landlock::LandlockResult::Err(e) => is
+            write("Nie udalo sie zalozyc piaskownicy: " + e.message)
+        end
+    end
+
+    ;; Od tego miejsca proces (i kazdy jego potomek) nie moze juz zapisywac
+    ;; ani tworzyc plikow NIGDZIE w systemie plikow - restrict_self jest
+    ;; nieodwracalne. Proba np. `fs::write("/tmp/cokolwiek", "x")` zakonczy
+    ;; sie bledem EACCES/EPERM od tego momentu az do konca procesu.
+end
