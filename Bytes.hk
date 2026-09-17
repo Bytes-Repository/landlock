@@ -1,1 +1,15 @@
+[package]
+-> name        => landlock
+-> version     => 0.1.0
+-> description => Bindingi do Linuksowego Landlocka (LSM sandboxing) w 100% H# - bez wlasnego kodu C/Rust, wylacznie `extern static [c]` do libc juz obecnej w systemie
+-> author      => Bytes Developers
+-> license     => MIT
 
+[build]
+-> lang   => h#
+-> entry  => src/landlock.h#
+-> output => build/liblandlock
+-> emit   => lib
+
+[deps]
+-> libc => dynamic
