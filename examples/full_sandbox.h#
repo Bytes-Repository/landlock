@@ -1,0 +1,58 @@
+use "bytes -> landlock" from "landlock"
+
+fn build_sandbox() -> landlock::LandlockResult<bool> is
+    let abi: int = landlock::abi_version()
+    if abi <= 0 is
+        return landlock::LandlockResult::Err(landlock::LandlockError {
+            message:    "Landlock niewspierany przez to jadro",
+            errno_code: 0,
+        })
+    end
+    write("Jadro wspiera Landlock ABI " + to_string(abi))
+
+    ;; Obejmij wszystkie prawa fs znane tej wersji ABI, ale ogranicz sieci
+    ;; tylko jesli ABI je zna (>= 4) - inaczej `handled_net = 0` i
+    ;; `allow_tcp_port` nie ma sensu wolac.
+    let handled_fs:  int = landlock_consts::access_fs_all_for_abi(abi)
+    let handled_net: int = landlock_consts::access_net_all_for_abi(abi)
+
+    let mut rs: landlock::Ruleset = landlock::Ruleset { fd: -1 }
+    match landlock::new_ruleset(handled_fs, handled_net) is
+        landlock::LandlockResult::Ok(r)  => is rs = r end
+        landlock::LandlockResult::Err(e) => is return landlock::LandlockResult::Err(e) end
+    end
+
+    ;; Odczyt calego systemu w /usr, pelny dostep (odczyt/zapis/tworzenie)
+    ;; w katalogu roboczym aplikacji.
+    match landlock::allow_path(rs, "/usr", landlock_consts::access_fs_read_only()) is
+        landlock::LandlockResult::Ok(_)  => is end
+        landlock::LandlockResult::Err(e) => is landlock::close_ruleset(rs) return landlock::LandlockResult::Err(e) end
+    end
+
+    match landlock::allow_path(rs, "/var/app-data", handled_fs) is
+        landlock::LandlockResult::Ok(_)  => is end
+        landlock::LandlockResult::Err(e) => is landlock::close_ruleset(rs) return landlock::LandlockResult::Err(e) end
+    end
+
+    ;; Dopiero laczenie wychodzace na 443 (np. do jednego, zaufanego API),
+    ;; bez prawa nasluchiwania na czymkolwiek - tylko gdy ABI >= 4.
+    if handled_net != 0 is
+        match landlock::allow_tcp_port(rs, 443, landlock_consts::access_net_connect_tcp()) is
+            landlock::LandlockResult::Ok(_)  => is end
+            landlock::LandlockResult::Err(e) => is landlock::close_ruleset(rs) return landlock::LandlockResult::Err(e) end
+        end
+    end
+
+    return landlock::restrict_self(rs)
+end
+
+fn main() is
+    match build_sandbox() is
+        landlock::LandlockResult::Ok(_) => is
+            write("Piaskownica aktywna: /usr (RO), /var/app-data (RW), wychodzace :443")
+        end
+        landlock::LandlockResult::Err(e) => is
+            write("Blad (kod " + to_string(e.errno_code) + "): " + e.message)
+        end
+    end
+end
