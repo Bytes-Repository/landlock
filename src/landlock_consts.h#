@@ -1,0 +1,97 @@
+pub fn sys_landlock_create_ruleset() -> int is return 444 end
+pub fn sys_landlock_add_rule()       -> int is return 445 end
+pub fn sys_landlock_restrict_self()  -> int is return 446 end
+
+;; ── landlock_create_ruleset(2): flagi ─────────────────────────────────────
+;; Gdy `attr == NULL` i `size == 0`, jedna z tych flag zamienia wywolanie w
+;; zapytanie o mozliwosci jadra zamiast tworzenia rulesetu.
+pub fn create_ruleset_version() -> int is return 1 end ;; LANDLOCK_CREATE_RULESET_VERSION -> zwraca numer ABI
+pub fn create_ruleset_errata()  -> int is return 2 end ;; LANDLOCK_CREATE_RULESET_ERRATA  -> zwraca bitmase poprawek (ABI >= 6)
+
+;; ── enum landlock_rule_type ─────────────────────────────────────────────────
+pub fn rule_type_path_beneath() -> int is return 1 end
+pub fn rule_type_net_port()     -> int is return 2 end
+
+;; ── LANDLOCK_ACCESS_FS_* (kazde prawo to jeden bit w __u64) ────────────────
+pub fn access_fs_execute()     -> int is return 1 << 0  end
+pub fn access_fs_write_file()  -> int is return 1 << 1  end
+pub fn access_fs_read_file()   -> int is return 1 << 2  end
+pub fn access_fs_read_dir()    -> int is return 1 << 3  end
+pub fn access_fs_remove_dir()  -> int is return 1 << 4  end
+pub fn access_fs_remove_file() -> int is return 1 << 5  end
+pub fn access_fs_make_char()   -> int is return 1 << 6  end
+pub fn access_fs_make_dir()    -> int is return 1 << 7  end
+pub fn access_fs_make_reg()    -> int is return 1 << 8  end
+pub fn access_fs_make_sock()   -> int is return 1 << 9  end
+pub fn access_fs_make_fifo()   -> int is return 1 << 10 end
+pub fn access_fs_make_block()  -> int is return 1 << 11 end
+pub fn access_fs_make_sym()    -> int is return 1 << 12 end
+pub fn access_fs_refer()       -> int is return 1 << 13 end ;; ABI >= 2
+pub fn access_fs_truncate()    -> int is return 1 << 14 end ;; ABI >= 3
+pub fn access_fs_ioctl_dev()   -> int is return 1 << 15 end ;; ABI >= 5
+
+;; ── LANDLOCK_ACCESS_NET_* ────────────────────────────────────────────────────
+pub fn access_net_bind_tcp()    -> int is return 1 << 0 end ;; ABI >= 4
+pub fn access_net_connect_tcp() -> int is return 1 << 1 end ;; ABI >= 4
+
+;; ── LANDLOCK_SCOPE_* (pole "scoped" w ruleset_attr, ABI >= 6) ──────────────
+pub fn scope_abstract_unix_socket() -> int is return 1 << 0 end
+pub fn scope_signal()               -> int is return 1 << 1 end
+
+;; ── Gotowe zestawy praw ─────────────────────────────────────────────────────
+;; landlock(7) zaleca obejmowac tyle praw, ile dana wersja ABI zna, zamiast
+;; wpisywac na sztywno jeden konkretny zestaw bitow - inaczej program
+;; skompilowany dzis przestanie ograniczac nowe prawa dodane w przyszlych
+;; jadrach (np. nowy typ pliku), bo `handled_access_fs` ich po prostu nie
+;; wymieni.
+pub fn access_fs_all_for_abi(abi: int) -> int is
+    let mut mask: int = access_fs_execute()     | access_fs_write_file() |
+                         access_fs_read_file()  | access_fs_read_dir()   |
+                         access_fs_remove_dir() | access_fs_remove_file() |
+                         access_fs_make_char()  | access_fs_make_dir()   |
+                         access_fs_make_reg()   | access_fs_make_sock()  |
+                         access_fs_make_fifo()  | access_fs_make_block() |
+                         access_fs_make_sym()
+    if abi >= 2 is mask = mask | access_fs_refer()     end
+    if abi >= 3 is mask = mask | access_fs_truncate()  end
+    if abi >= 5 is mask = mask | access_fs_ioctl_dev() end
+    return mask
+end
+
+;; Wygodny zestaw "tylko do odczytu": czytanie plikow, przegladanie
+;; katalogow i wykonywanie binariow (bez wykonywania EXECUTE ograniczenie
+;; byloby bezuzyteczne dla wiekszosci sandboxow, ktore wciaz musza
+;; uruchamiac programy z dozwolonych sciezek).
+pub fn access_fs_read_only() -> int is
+    return access_fs_read_file() | access_fs_read_dir() | access_fs_execute()
+end
+
+pub fn access_net_all_for_abi(abi: int) -> int is
+    if abi >= 4 is return access_net_bind_tcp() | access_net_connect_tcp() end
+    return 0
+end
+
+pub fn scope_all_for_abi(abi: int) -> int is
+    if abi >= 6 is return scope_abstract_unix_socket() | scope_signal() end
+    return 0
+end
+
+;; ── prctl(2) ─────────────────────────────────────────────────────────────────
+pub fn pr_set_no_new_privs() -> int is return 38 end
+
+;; ── open(2) flagi potrzebne do zdobycia parent_fd dla path_beneath ─────────
+;; O_PATH: otwiera referencje do sciezki bez prawa do odczytu/zapisu/
+;; wykonania samego pliku/katalogu - dokladnie tyle, ile potrzebuje
+;; `landlock_path_beneath_attr.parent_fd`.
+pub fn o_path()    -> int is return 2097152 end ;; 0o10000000
+pub fn o_cloexec() -> int is return 524288  end ;; 0o2000000
+
+;; ── Wybrane kody errno, dla ktorych dajemy czytelny komunikat ─────────────
+pub fn errno_eperm()      -> int is return 1  end
+pub fn errno_e2big()      -> int is return 7  end
+pub fn errno_ebadf()      -> int is return 9  end
+pub fn errno_efault()     -> int is return 14 end
+pub fn errno_einval()     -> int is return 22 end
+pub fn errno_enosys()     -> int is return 38 end
+pub fn errno_enomsg()     -> int is return 42 end
+pub fn errno_eopnotsupp() -> int is return 95 end
