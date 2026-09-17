@@ -1,0 +1,35 @@
+extern static [c] is
+    fn syscall(nr: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64
+end
+
+;; `prctl` jest zwykla funkcja libc (nie idzie przez `syscall()`). Ten sam
+;; trik ze stala liczba argumentow: prawdziwy prototyp to
+;; `int prctl(int, ...)`, ale wywolanie z piecioma argumentami calkowitymi
+;; jest identyczne na poziomie ABI.
+extern static [c] is
+    fn prctl(option: i32, arg2: i64, arg3: i64, arg4: i64, arg5: i64) -> i32
+end
+
+;; Potrzebne do zamiany sciezki na deskryptor pliku dla
+;; `landlock_path_beneath_attr.parent_fd`.
+extern static [c] is
+    fn open(path: string, flags: i32, mode: i32) -> i32
+    fn close(fd: i32) -> i32
+end
+
+;; Adres `errno` biezacego watku (to samo, co stoi za makrem `errno` z
+;; <errno.h> - eksportowane pod tą nazwą zarówno przez glibc, jak i musl).
+extern static [c] is
+    fn __errno_location() -> i64
+end
+
+;; Wygodny wrapper: `__errno_location()` zwraca adres jako `i64`,
+;; `ptr_read_i32` czyta spod niego 4-bajtowy `int`, ktorym errno zawsze jest.
+pub fn errno() -> int is
+    let addr: int = __errno_location()
+    let mut value: int = 0
+    unsafe is
+        value = ptr_read_i32(addr, 0)
+    end
+    return value
+end
