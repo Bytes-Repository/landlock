@@ -1,0 +1,53 @@
+pub fn ruleset_attr_size() -> int is return 24 end
+
+pub fn build_ruleset_attr(handled_fs: int, handled_net: int, scoped: int) -> int is
+    let mut buf: int = 0
+    unsafe is
+        buf = arc_alloc(24)
+        ptr_write_i64(buf, 0,  handled_fs)
+        ptr_write_i64(buf, 8,  handled_net)
+        ptr_write_i64(buf, 16, scoped)
+    end
+    return buf
+end
+
+;; struct landlock_path_beneath_attr {
+;;     __u64 allowed_access;  // offset 0
+;;     __s32 parent_fd;       // offset 8
+;; } __attribute__((packed)); // rozmiar CALKOWITY: 12 bajtow (packed - bez
+;;                            // wyrownania do 16, ktore dostalbys "za darmo"
+;;                            // dla `__s32` po `__u64` bez tego atrybutu)
+pub fn build_path_beneath_attr(allowed_access: int, parent_fd: int) -> int is
+    let mut buf: int = 0
+    unsafe is
+        buf = arc_alloc(12)
+        ptr_write_i64(buf, 0, allowed_access)
+        ptr_write_i32(buf, 8, parent_fd)
+    end
+    return buf
+end
+
+;; struct landlock_net_port_attr {
+;;     __u64 allowed_access; // offset 0
+;;     __u64 port;           // offset 8
+;; };                        // rozmiar: 16 bajtow (bez packed - nie trzeba,
+;;                           // oba pola maja te sama szerokosc)
+pub fn build_net_port_attr(allowed_access: int, port: int) -> int is
+    let mut buf: int = 0
+    unsafe is
+        buf = arc_alloc(16)
+        ptr_write_i64(buf, 0, allowed_access)
+        ptr_write_i64(buf, 8, port)
+    end
+    return buf
+end
+
+;; Zwalnia bufor zwrocony przez ktorakolwiek z powyzszych funkcji. Wywolaj
+;; dokladnie raz, po tym jak syscall, ktoremu przekazales bufor, juz wrocil
+;; (jadro kopiuje potrzebne dane do siebie w trakcie samego wywolania -
+;; zwolnienie bufora zaraz po `syscall(...)` jest bezpieczne).
+pub fn free_attr(buf: int) is
+    unsafe is
+        arc_release(buf)
+    end
+end
