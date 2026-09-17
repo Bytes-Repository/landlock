@@ -1,0 +1,96 @@
+use "bytes -> landlock" from "landlock"
+
+#[test]
+fn test_abi_version_non_negative() is
+    let abi: int = landlock::abi_version()
+    assert_true(abi >= 0)
+end
+
+#[test]
+fn test_is_supported_matches_abi_version() is
+    let abi: int = landlock::abi_version()
+    assert_eq(landlock::is_supported(), abi > 0)
+end
+
+#[test]
+fn test_new_ruleset_rejects_empty_rights() is
+    match landlock::new_ruleset(0, 0) is
+        landlock::LandlockResult::Err(e) => is
+            assert_eq(e.errno_code, 0)
+        end
+        landlock::LandlockResult::Ok(r) => is
+            landlock::close_ruleset(r)
+            fail("new_ruleset(0, 0) powinno zwrocic Err, a zwrocilo Ok")
+        end
+    end
+end
+
+#[test]
+fn test_new_ruleset_and_allow_path_when_supported() is
+    if !landlock::is_supported() is
+        skip()
+        return
+    end
+
+    let fs_rights: int = landlock_consts::access_fs_read_only()
+    let mut rs: landlock::Ruleset = landlock::Ruleset { fd: -1 }
+
+    match landlock::new_ruleset(fs_rights, 0) is
+        landlock::LandlockResult::Ok(r) => is rs = r end
+        landlock::LandlockResult::Err(e) => is
+            fail("new_ruleset nie powiodlo sie mimo is_supported() == true: " + e.message)
+        end
+    end
+
+    assert_true(rs.fd >= 0)
+
+    match landlock::allow_path(rs, "/", fs_rights) is
+        landlock::LandlockResult::Ok(_) => is end
+        landlock::LandlockResult::Err(e) => is
+            landlock::close_ruleset(rs)
+            fail("allow_path('/') nie powiodlo sie: " + e.message)
+        end
+    end
+
+    ;; Zamykamy fd bez restrict_self - proces testowy zostaje nietkniety.
+    landlock::close_ruleset(rs)
+end
+
+#[test]
+fn test_allow_path_reports_error_for_missing_path() is
+    if !landlock::is_supported() is
+        skip()
+        return
+    end
+
+    let fs_rights: int = landlock_consts::access_fs_read_only()
+    let mut rs: landlock::Ruleset = landlock::Ruleset { fd: -1 }
+    match landlock::new_ruleset(fs_rights, 0) is
+        landlock::LandlockResult::Ok(r)  => is rs = r end
+        landlock::LandlockResult::Err(e) => is fail(e.message) end
+    end
+
+    match landlock::allow_path(rs, "/sciezka/ktora/na-pewno-nie-istnieje-xyz", fs_rights) is
+        landlock::LandlockResult::Err(_) => is end
+        landlock::LandlockResult::Ok(_)  => is
+            fail("allow_path na nieistniejacej sciezce powinno zwrocic Err")
+        end
+    end
+
+    landlock::close_ruleset(rs)
+end
+
+#[test]
+fn test_error_string_is_never_empty() is
+    assert_true(landlock::error_string(0).len() > 0)
+    assert_true(landlock::error_string(landlock_consts::errno_einval()).len() > 0)
+    assert_true(landlock::error_string(9999).len() > 0)
+end
+
+#[test]
+fn test_access_fs_all_for_abi_grows_with_abi() is
+    let low:  int = landlock_consts::access_fs_all_for_abi(1)
+    let high: int = landlock_consts::access_fs_all_for_abi(6)
+    ;; ABI 6 zna co najmniej wszystkie prawa, ktore zna ABI 1.
+    assert_eq(low & high, low)
+end
