@@ -1,1 +1,247 @@
+mod landlock_consts
+mod landlock_ffi
+mod landlock_attr
 
+;; ── Publiczne typy ───────────────────────────────────────────────────────
+
+;; Uchwyt do jeszcze niezaaplikowanego rulesetu (deskryptor pliku zwrocony
+;; przez `landlock_create_ruleset(2)`). Dodawaj do niego reguly przez
+;; `allow_path`/`allow_tcp_port`, a na koniec aktywuj przez `restrict_self`.
+pub struct Ruleset is
+    pub fd: int
+end
+
+pub struct LandlockError is
+    pub message:    string
+    pub errno_code: int
+end
+
+;; Prosty odpowiednik Result<T, E> (H# nie ma go w standardzie - patrz
+;; `Maybe<T>` w `examples/showcase.h#` po analogiczny wzorzec dla Option<T>).
+enum LandlockResult<T> is
+    Ok(T)
+    Err(LandlockError)
+end
+
+;; ── Tlumaczenie bledow ────────────────────────────────────────────────────
+
+pub fn error_string(code: int) -> string is
+    if code == landlock_consts::errno_eperm() is
+        return "EPERM: restrict_self wymaga wczesniejszego prctl(PR_SET_NO_NEW_PRIVS) albo CAP_SYS_ADMIN"
+    end
+    if code == landlock_consts::errno_e2big() is
+        return "E2BIG: struktura attr jest za duza/nieznana dla tej wersji ABI jadra"
+    end
+    if code == landlock_consts::errno_ebadf() is
+        return "EBADF: nieprawidlowy deskryptor pliku (ruleset juz zamkniety?)"
+    end
+    if code == landlock_consts::errno_efault() is
+        return "EFAULT: nieprawidlowy adres przekazany do syscalla"
+    end
+    if code == landlock_consts::errno_einval() is
+        return "EINVAL: nieznane flagi, nieznane prawo dostepu albo zly rozmiar struktury"
+    end
+    if code == landlock_consts::errno_enosys() is
+        return "ENOSYS: to jadro nie zna syscalli Landlocka (potrzebny Linux >= 5.13)"
+    end
+    if code == landlock_consts::errno_enomsg() is
+        return "ENOMSG: handled_access_fs i handled_access_net sa oba puste"
+    end
+    if code == landlock_consts::errno_eopnotsupp() is
+        return "EOPNOTSUPP: Landlock jest wkompilowany w jadro, ale wylaczony w czasie rozruchu (np. parametr jadra 'landlock=0' albo brak CONFIG_SECURITY_LANDLOCK)"
+    end
+    if code == 0 is
+        return "(blad wykryty po stronie H#, przed jakimkolwiek syscallem)"
+    end
+    return "errno " + to_string(code)
+end
+
+;; ── Wykrywanie wsparcia jadra ─────────────────────────────────────────────
+
+;; Zwraca numer wspieranej wersji ABI Landlocka (1, 2, 3, ...), albo 0 jesli
+;; jadro w ogole go nie wspiera / jest wylaczony. Nie tworzy zadnego
+;; rulesetu - to czyste zapytanie (`attr = NULL`, `size = 0`).
+pub fn abi_version() -> int is
+    let ret: int = syscall(landlock_consts::sys_landlock_create_ruleset(), 0, 0, landlock_consts::create_ruleset_version(), 0)
+    if ret < 0 is return 0 end
+    return ret
+end
+
+pub fn is_supported() -> bool is
+    return abi_version() > 0
+end
+
+;; ── Tworzenie rulesetu ────────────────────────────────────────────────────
+
+;; `handled_fs`/`handled_net` to maski bitowe zbudowane z
+;; `landlock_consts::access_fs_*()` / `landlock_consts::access_net_*()` (albo z gotowych
+;; kombinacji jak `landlock_consts::access_fs_all_for_abi(...)`) - okreslaja, JAKIE
+;; KATEGORIE dostepu ten ruleset w ogole bedzie umial ograniczac. Co
+;; konkretnie jest dozwolone, ustawiasz pozniej per-sciezka/port przez
+;; `allow_path`/`allow_tcp_port`.
+pub fn new_ruleset(handled_fs: int, handled_net: int) -> LandlockResult<Ruleset> is
+    return new_ruleset_scoped(handled_fs, handled_net, 0)
+end
+
+;; Jak `new_ruleset`, plus pole "scoped" (`landlock_consts::scope_*()`, ABI >= 6) -
+;; izoluje proces od abstrakcyjnych socketow uniksowych i/lub sygnalow
+;; procesow spoza jego wlasnego domeny Landlocka.
+pub fn new_ruleset_scoped(handled_fs: int, handled_net: int, scoped: int) -> LandlockResult<Ruleset> is
+    if handled_fs == 0 && handled_net == 0 is
+        return LandlockResult::Err(LandlockError {
+            message:    "handled_fs i handled_net nie moga byc oba rowne 0 - jadro odrzuci to z ENOMSG",
+            errno_code: 0,
+        })
+    end
+
+    let buf: int = landlock_attr::build_ruleset_attr(handled_fs, handled_net, scoped)
+    let fd:  int = syscall(landlock_consts::sys_landlock_create_ruleset(), buf, landlock_attr::ruleset_attr_size(), 0, 0)
+    let err: int = landlock_ffi::errno()
+    landlock_attr::free_attr(buf)
+
+    if fd < 0 is
+        return LandlockResult::Err(LandlockError {
+            message:    "landlock_create_ruleset nie powiodlo sie: " + error_string(err),
+            errno_code: err,
+        })
+    end
+    return LandlockResult::Ok(Ruleset { fd: fd })
+end
+
+;; ── Reguly ────────────────────────────────────────────────────────────────
+
+;; Dodaje regule "zezwol na `allowed_access` w obrebie `path`" (plik lub
+;; katalog - dostep jest dziedziczony rekurencyjnie w dol drzewa katalogow).
+;; `allowed_access` musi byc podzbiorem `handled_fs` przekazanego do
+;; `new_ruleset` dla tego rulesetu.
+pub fn allow_path(rs: Ruleset, path: string, allowed_access: int) -> LandlockResult<bool> is
+    let fd: int = open(path, landlock_consts::o_path() | landlock_consts::o_cloexec(), 0)
+    if fd < 0 is
+        return LandlockResult::Err(LandlockError {
+            message:    "nie mozna otworzyc '" + path + "' (O_PATH) - sprawdz czy sciezka istnieje: " + error_string(landlock_ffi::errno()),
+            errno_code: landlock_ffi::errno(),
+        })
+    end
+
+    let buf: int = landlock_attr::build_path_beneath_attr(allowed_access, fd)
+    let ret: int = syscall(landlock_consts::sys_landlock_add_rule(), rs.fd, landlock_consts::rule_type_path_beneath(), buf, 0)
+    let err: int = landlock_ffi::errno()
+    landlock_attr::free_attr(buf)
+    close(fd)
+
+    if ret < 0 is
+        return LandlockResult::Err(LandlockError {
+            message:    "landlock_add_rule (path_beneath) nie powiodlo sie dla '" + path + "': " + error_string(err),
+            errno_code: err,
+        })
+    end
+    return LandlockResult::Ok(true)
+end
+
+;; Dodaje regule sieciowa (ABI >= 4): `allowed_access` to
+;; `landlock_consts::access_net_bind_tcp()` i/lub `landlock_consts::access_net_connect_tcp()`,
+;; `port` to numer portu TCP (host byte order, tak jak podajesz go w kodzie:
+;; brak potrzeby recznego `htons`).
+pub fn allow_tcp_port(rs: Ruleset, port: int, allowed_access: int) -> LandlockResult<bool> is
+    let buf: int = landlock_attr::build_net_port_attr(allowed_access, port)
+    let ret: int = syscall(landlock_consts::sys_landlock_add_rule(), rs.fd, landlock_consts::rule_type_net_port(), buf, 0)
+    let err: int = landlock_ffi::errno()
+    landlock_attr::free_attr(buf)
+
+    if ret < 0 is
+        return LandlockResult::Err(LandlockError {
+            message:    "landlock_add_rule (net_port) nie powiodlo sie dla portu " + to_string(port) + ": " + error_string(err),
+            errno_code: err,
+        })
+    end
+    return LandlockResult::Ok(true)
+end
+
+;; ── Aktywacja / sprzatanie ────────────────────────────────────────────────
+
+fn raw_no_new_privs() -> bool is
+    return prctl(landlock_consts::pr_set_no_new_privs(), 1, 0, 0, 0) >= 0
+end
+
+;; Ustawia `PR_SET_NO_NEW_PRIVS` samodzielnie, bez restrykcji. `restrict_self`
+;; wola to wewnetrznie - wywoluj to osobno tylko jesli chcesz zablokowac
+;; podnoszenie uprawnien (np. przez setuid) niezaleznie od Landlocka.
+pub fn set_no_new_privs() -> LandlockResult<bool> is
+    if raw_no_new_privs() is return LandlockResult::Ok(true) end
+    return LandlockResult::Err(LandlockError {
+        message:    "prctl(PR_SET_NO_NEW_PRIVS, 1) nie powiodlo sie: " + error_string(landlock_ffi::errno()),
+        errno_code: landlock_ffi::errno(),
+    })
+end
+
+;; Aplikuje ruleset do biezacego procesu. NIEODWRACALNE: od tego momentu ten
+;; proces (i kazdy jego potomek) ma trwale ograniczony dostep, az do konca
+;; swojego zycia. Ustawia najpierw `no_new_privs` (Landlock tego wymaga bez
+;; CAP_SYS_ADMIN), potem woloa `landlock_restrict_self(2)`, a na koncu
+;; zamyka `rs.fd` (ruleset raz zaaplikowany nie potrzebuje juz otwartego fd -
+;; jadro trzyma wlasne odniesienie).
+pub fn restrict_self(rs: Ruleset) -> LandlockResult<bool> is
+    if !raw_no_new_privs() is
+        return LandlockResult::Err(LandlockError {
+            message:    "prctl(PR_SET_NO_NEW_PRIVS) nie powiodlo sie - restrict_self przerwany: " + error_string(landlock_ffi::errno()),
+            errno_code: landlock_ffi::errno(),
+        })
+    end
+
+    let ret: int = syscall(landlock_consts::sys_landlock_restrict_self(), rs.fd, 0, 0, 0)
+    if ret < 0 is
+        let err: int = landlock_ffi::errno()
+        return LandlockResult::Err(LandlockError {
+            message:    "landlock_restrict_self nie powiodlo sie: " + error_string(err),
+            errno_code: err,
+        })
+    end
+
+    close(rs.fd)
+    return LandlockResult::Ok(true)
+end
+
+;; Zamyka fd rulesetu bez aplikowania go - uzyj przy sprzataniu po bledzie
+;; (np. gdy jedna z regul zawiodla i rezygnujesz z sandboxowania).
+pub fn close_ruleset(rs: Ruleset) is
+    if rs.fd >= 0 is close(rs.fd) end
+end
+
+;; ── Wygodna funkcja wysokopoziomowa ───────────────────────────────────────
+
+;; Ogranicza biezacy proces do dostepu tylko-do-odczytu (+ wykonywania) w
+;; obrebie podanych sciezek, po czym natychmiast go restrykuje. Zadna siec
+;; nie jest ograniczana (handled_net = 0). Wygodne dla najczestszego
+;; przypadku: "ten proces ma czytac tylko stad i stad, nic wiecej".
+pub fn sandbox_readonly(paths: [string]) -> LandlockResult<bool> is
+    let abi: int = abi_version()
+    if abi <= 0 is
+        return LandlockResult::Err(LandlockError {
+            message:    "Landlock nie jest wspierany przez to jadro (potrzebny Linux >= 5.13 z CONFIG_SECURITY_LANDLOCK)",
+            errno_code: 0,
+        })
+    end
+
+    let fs_rights: int = landlock_consts::access_fs_read_only()
+    let mut rs: Ruleset = Ruleset { fd: -1 }
+
+    match new_ruleset(fs_rights, 0) is
+        LandlockResult::Ok(r)  => is rs = r end
+        LandlockResult::Err(e) => is return LandlockResult::Err(e) end
+    end
+
+    let n: int = array_len(paths)
+    let mut i: int = 0
+    while i < n is
+        match allow_path(rs, paths[i], fs_rights) is
+            LandlockResult::Ok(_)  => is end
+            LandlockResult::Err(e) => is
+                close_ruleset(rs)
+                return LandlockResult::Err(e)
+            end
+        end
+        i += 1
+    end
+
+    return restrict_self(rs)
+end
